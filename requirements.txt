@@ -1,0 +1,6 @@
+# Python dependencies for the Speed Limit API fetcher scripts
+# Target Python: 3.8+
+
+aiohttp==3.9.1
+psycopg[binary]==3.2.10
+psycopg-pool==3.2.6
