@@ -1,46 +1,88 @@
-name: Update Display Names
+name: Continuous Display Name Update
+
 on:
-  schedule:
-    - cron: '0 */4 * * *'  # Run every 6 hours
-  workflow_dispatch:  # Allow manual triggering
+  # Manual trigger only for continuous mode
+  workflow_dispatch:
+    inputs:
+      duration_hours:
+        description: 'How many hours to run continuously'
+        required: true
+        default: '2'
+      batch_size:
+        description: 'Batch size (rows per batch)'
+        required: false
+        default: '100'
+      workers:
+        description: 'Number of worker threads'
+        required: false
+        default: '5'
 
 jobs:
-  update-display-names:
+  continuous-update:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:14
-        env:
-          POSTGRES_USER: ${{ secrets.PGUSER }}
-          POSTGRES_PASSWORD: ${{ secrets.PGPASSWORD }}
-          POSTGRES_DB: ${{ secrets.PGDATABASE }}
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
+    timeout-minutes: 360  # Max 6 hours
+    
     steps:
-      - uses: actions/checkout@v3
-      
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
-          
+          python-version: '3.11'
+          cache: 'pip'
+
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install psycopg2-binary
+          pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Run display name updater
+      - name: Run continuous update
         env:
-          PGHOST: ${{ secrets.PGHOST }}
-          PGPORT: ${{ secrets.PGPORT }}
-          PGDATABASE: ${{ secrets.PGDATABASE }}
-          PGUSER: ${{ secrets.PGUSER }}
-          PGPASSWORD: ${{ secrets.PGPASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SPEEDLIMIT_DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          python update_display_names.py --batch-size 50 --sleep 0.3 --workers 3 --timeout 15 --retries 3
+          DURATION_HOURS="${{ github.event.inputs.duration_hours }}"
+          BATCH_SIZE="${{ github.event.inputs.batch_size }}"
+          WORKERS="${{ github.event.inputs.workers }}"
+          
+          echo "Starting continuous display name updater..."
+          echo "Configuration:"
+          echo "  - Duration: ${DURATION_HOURS} hours"
+          echo "  - Batch size: $BATCH_SIZE"
+          echo "  - Workers: $WORKERS"
+          
+          # Run in background with timeout
+          timeout ${DURATION_HOURS}h python3 update_display_name.py \
+            --batch-size "$BATCH_SIZE" \
+            --workers "$WORKERS" \
+            --sleep 0.2 \
+            --loop \
+            --idle-sleep 60 \
+            --timeout 15.0 \
+            --retries 3 \
+            --log-file logs/continuous_update.log \
+            || true
+          
+          echo "Continuous update finished after timeout or completion"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: continuous-update-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 7
+
+      - name: Show statistics
+        if: always()
+        run: |
+          echo "📊 Update Statistics:"
+          if [ -f logs/continuous_update.log ]; then
+            echo ""
+            echo "Total rows updated:"
+            grep -c "Successfully updated" logs/continuous_update.log || echo "0"
+            echo ""
+            echo "Last 30 lines of log:"
+            tail -n 30 logs/continuous_update.log
+          fi
