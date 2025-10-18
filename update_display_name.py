@@ -12,8 +12,9 @@ import logging
 import os
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Iterator, List, Optional, Sequence, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
@@ -21,7 +22,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from db_config import connection_scope, get_pool
+# PostgreSQL imports
+import psycopg
+from psycopg.rows import dict_row
+try:
+    from psycopg_pool import ConnectionPool
+except ImportError:
+    ConnectionPool = None
 
 
 API_ENDPOINT = "https://nominatim.openstreetmap.org/reverse"
@@ -39,6 +46,107 @@ UpdateData = Tuple[int, str]
 DEFAULT_DATABASE_URL = os.getenv(
     "DATABASE_URL"
 )
+
+# Database connection pool (for multi-threaded mode)
+_POOL: Optional["ConnectionPool"] = None
+_POOL_LOCK: Lock = Lock()
+
+
+# ============================================================================
+# DATABASE CONNECTION FUNCTIONS (copied from db_config.py)
+# ============================================================================
+
+def _env_int(name: str, default: int) -> int:
+    """Return an integer environment variable value or the default if invalid."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _build_connect_kwargs():
+    """Construct keyword arguments for psycopg.connect."""
+    database_url = os.getenv("SPEEDLIMIT_DATABASE_URL")
+    if database_url:
+        return {"conninfo": database_url}
+    else:
+        # Fallback: use DEFAULT_DATABASE_URL if SPEEDLIMIT_DATABASE_URL is not set
+        return {"conninfo": DEFAULT_DATABASE_URL}
+
+
+def connect() -> psycopg.Connection:
+    """Return a psycopg connection to the configured PostgreSQL database."""
+    return psycopg.connect(**_build_connect_kwargs())
+
+
+def get_pool() -> "ConnectionPool":
+    """Initialise (once) and return a psycopg pooled connection object."""
+    if ConnectionPool is None:
+        raise RuntimeError(
+            "psycopg_pool is required for connection pooling. "
+            "Install the 'psycopg-pool' package or set SPEEDLIMIT_DISABLE_POOLING=1."
+        )
+
+    global _POOL
+    if _POOL is None:
+        with _POOL_LOCK:
+            if _POOL is None:
+                min_size = max(1, _env_int("SPEEDLIMIT_POOL_MIN_SIZE", 1))
+                max_size = max(min_size, _env_int("SPEEDLIMIT_POOL_MAX_SIZE", 5))
+                connect_kwargs = _build_connect_kwargs()
+                conninfo = connect_kwargs.pop("conninfo", None)
+                pool_kwargs = {"min_size": min_size, "max_size": max_size}
+
+                if conninfo:
+                    if connect_kwargs:
+                        pool_kwargs["kwargs"] = connect_kwargs
+                    _POOL = ConnectionPool(conninfo, **pool_kwargs)
+                else:
+                    pool_kwargs["kwargs"] = connect_kwargs or None
+                    _POOL = ConnectionPool(**pool_kwargs)
+    return _POOL
+
+
+@contextmanager
+def connection_scope(*, dict_rows: bool = False) -> Iterator[psycopg.Connection]:
+    """Context manager that handles commit/rollback automatically."""
+    disable_pooling = os.getenv("SPEEDLIMIT_DISABLE_POOLING", "0") == "1"
+
+    if disable_pooling or ConnectionPool is None:
+        conn = connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return
+
+    pool = get_pool()
+    with pool.connection() as conn:
+        previous_row_factory = conn.row_factory
+        if dict_rows:
+            conn.row_factory = dict_row
+        try:
+            yield conn
+            if not conn.autocommit:
+                conn.commit()
+        except Exception:
+            if not conn.autocommit:
+                conn.rollback()
+            raise
+        finally:
+            conn.row_factory = previous_row_factory
+
+
+# ============================================================================
+# MAIN APPLICATION LOGIC
+# ============================================================================
 
 
 def configure_logging(log_file: Optional[Path]) -> None:
