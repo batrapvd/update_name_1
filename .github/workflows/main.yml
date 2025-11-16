@@ -8,6 +8,7 @@ on:
         description: 'How many minutes to run continuously'
         required: true
         default: '380'
+        default: '5'
       batch_size:
         description: 'Batch size (rows per batch)'
         required: false
@@ -15,8 +16,6 @@ on:
       workers:
         description: 'Number of worker threads'
         required: false
-        default: '2'
-
 jobs:
   continuous-update:
     runs-on: ubuntu-latest
