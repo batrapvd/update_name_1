@@ -15,7 +15,7 @@ on:
       workers:
         description: 'Number of worker threads'
         required: false
-        default: '5'
+        default: '2'
 
 jobs:
   continuous-update:
@@ -57,10 +57,11 @@ jobs:
           echo "  - Workers: $WORKERS"
 
           # Run in background with timeout (using minutes)
+          # Using 1.2s sleep to strictly respect Nominatim's 1 req/sec limit
           timeout ${DURATION_MINUTES}m python3 update_display_name.py \
             --batch-size "$BATCH_SIZE" \
             --workers "$WORKERS" \
-            --sleep 0.2 \
+            --sleep 1.2 \
             --loop \
             --idle-sleep 60 \
             --timeout 15.0 \
